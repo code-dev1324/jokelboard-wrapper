@@ -1,2 +1,2 @@
-export { JokelboardClient } from './client.js';
-export { JokelboardError, RateLimitError, RevisionConflictError } from './errors.js';
+export { JokelboardClient, findCard } from './client.js';
+export { JokelboardError, JokelboardConfigurationError, RateLimitError, RevisionConflictError } from './errors.js';

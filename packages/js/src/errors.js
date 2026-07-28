@@ -10,7 +10,16 @@ export class JokelboardError extends Error {
     this.name = 'JokelboardError';
     this.code = code;
     this.status = status;
-    this.raw = raw;
+    this.raw = raw ?? null;
+  }
+}
+
+export class JokelboardConfigurationError extends Error {
+  /** @param {string} message */
+  constructor(message) {
+    super(message);
+    this.name = 'JokelboardConfigurationError';
+    this.code = 'configuration_error';
   }
 }
 
@@ -18,16 +27,12 @@ export class RateLimitError extends JokelboardError {
   /**
    * @param {string} message
    * @param {number} retryAfter
-   * @param {number} limit
-   * @param {number} windowMs
    * @param {unknown} [raw]
    */
-  constructor(message, retryAfter, limit, windowMs, raw) {
-    super('card_rate_limited', message, 429, raw);
+  constructor(message, retryAfter, raw) {
+    super('rate_limited', message, 429, raw);
     this.name = 'RateLimitError';
     this.retryAfter = retryAfter;
-    this.limit = limit;
-    this.windowMs = windowMs;
   }
 }
 
