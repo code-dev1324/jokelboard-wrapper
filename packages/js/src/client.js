@@ -9,7 +9,7 @@ const DEFAULT_MAX_CONFLICT_RETRIES = 1;
 
 /**
  * Normalises and validates the base URL. Enforces HTTPS (except localhost),
- * strips trailing slashes, and rejects embedded credentials.
+ * strips trailing slashes, and rejects embedded credentials, query strings, and hashes.
  * @param {string} value
  * @returns {string}
  */
@@ -24,28 +24,29 @@ function normaliseBaseUrl(value) {
   if (url.username || url.password) {
     throw new JokelboardConfigurationError('baseUrl must not contain credentials.');
   }
+  if (url.search || url.hash) {
+    throw new JokelboardConfigurationError('baseUrl must not contain a query string or hash.');
+  }
 
   const local = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local.has(url.hostname))) {
     throw new JokelboardConfigurationError('baseUrl must use HTTPS.');
   }
 
-  url.search = '';
-  url.hash = '';
   return url.toString().replace(/\/+$/, '');
 }
 
 /**
- * Asserts that a value is a non-empty string and returns it trimmed.
+ * Asserts that a value is a non-empty string or number and returns it as a trimmed string.
  * @param {unknown} value
  * @param {string} name
  * @returns {string}
  */
 function requireId(value, name) {
-  if (typeof value !== 'string' || !value.trim()) {
-    throw new JokelboardConfigurationError(`${name} must be a non-empty string.`);
+  if ((typeof value !== 'string' && typeof value !== 'number') || !String(value).trim()) {
+    throw new JokelboardConfigurationError(`${name} must be a non-empty string or number.`);
   }
-  return value.trim();
+  return String(value).trim();
 }
 
 /**
@@ -83,46 +84,171 @@ export function findCard(board, predicate) {
   return null;
 }
 
+/**
+ * Recursively replaces all occurrences of token in value with '[REDACTED]'.
+ * Prevents API tokens from leaking into error objects.
+ * @param {unknown} value
+ * @param {string} token
+ * @returns {unknown}
+ */
+function redactToken(value, token) {
+  if (typeof value === 'string') return value.split(token).join('[REDACTED]');
+  if (Array.isArray(value)) return value.map(v => redactToken(v, token));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactToken(v, token)]));
+  }
+  return value;
+}
+
 /** @param {number} ms @returns {Promise<void>} */
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ---- Client ----
+// ---- Board-scoped proxy ----
+
+class BoardClient {
+  /**
+   * @param {JokelboardClient} api
+   * @param {string} boardId
+   */
+  constructor(api, boardId) {
+    this._api = api;
+    this.id = boardId;
+
+    this.lists = Object.freeze({
+      create: (title) => api.createList(boardId, title),
+    });
+
+    this.cards = Object.freeze({
+      create: (listId, title, options) => api.createCard(boardId, listId, title, options),
+      update: (cardId, fields) => api.updateCard(boardId, cardId, fields),
+      patch: (cardId, patchOrFn) => api.patchCard(boardId, cardId, patchOrFn),
+      comment: (cardId, text, options) => api.addComment(boardId, cardId, text, options),
+      move: (cardId, toListId, options) => api.moveCard(boardId, cardId, toListId, options),
+      link: (cardId) => api.getCardLink(boardId, cardId),
+      vault: (cardId) => api.vaultCard(boardId, cardId),
+      restore: (cardId, options) => api.restoreCard(boardId, cardId, options),
+      find: (predicate) => api.findCard(boardId, predicate),
+      customField: (cardId, key) => api.getCustomField(boardId, cardId, key),
+      customFields: (cardId) => api.getCustomFields(boardId, cardId),
+      setCustomField: (cardId, key, value) => api.setCustomField(boardId, cardId, key, value),
+      setCustomFields: (cardId, fields) => api.setCustomFields(boardId, cardId, fields),
+    });
+
+    this.vault = Object.freeze({
+      list: () => api.getVault(boardId),
+      purge: (cardId, revision) => api.purgeCard(boardId, cardId, revision),
+    });
+
+    this.plugin = Object.freeze({
+      get: () => api.plugin.getBoard(boardId),
+      toggleChecklistItem: (cardId, itemId) => api.plugin.toggleChecklistItem(boardId, cardId, itemId),
+    });
+
+    Object.freeze(this);
+  }
+
+  /** @returns {Promise<object>} */
+  get() { return this._api.getBoard(this.id); }
+
+  /**
+   * @param {object} boardData
+   * @param {number} [revision]
+   * @returns {Promise<object>}
+   */
+  replace(boardData, revision) { return this._api.replaceBoard(this.id, boardData, revision); }
+
+  /**
+   * @param {(ctx: { revision: number, board: object, boardClient: BoardClient, attempt: number }) => Promise<any>} operation
+   * @param {{ retries?: number }} [options]
+   * @returns {Promise<any>}
+   */
+  withFreshRevision(operation, options) {
+    return this._api.withFreshRevision(this.id, operation, options);
+  }
+}
+
+// ---- Main client ----
 
 export class JokelboardClient {
   /**
    * @param {object} options
    * @param {string} options.token - Jokelboard API token (jkb_...)
+   * @param {string} [options.defaultBoardId] - Default board ID used when boardId is omitted
    * @param {string} [options.baseUrl] - Override API base URL
    * @param {number} [options.timeout] - Request timeout in ms (default: 10000)
    * @param {boolean} [options.retryOnRateLimit] - Auto-retry on 429 (default: true)
    * @param {number} [options.maxRetries] - Max 429 retry attempts (default: 3)
    * @param {number} [options.maxConflictRetries] - Max revision-conflict retries (default: 1)
+   * @param {typeof fetch} [options.fetchImpl] - Custom fetch implementation (for testing)
    */
   constructor({
     token,
+    defaultBoardId = null,
     baseUrl = DEFAULT_BASE_URL,
     timeout = DEFAULT_TIMEOUT,
     retryOnRateLimit = true,
     maxRetries = DEFAULT_MAX_RETRIES,
     maxConflictRetries = DEFAULT_MAX_CONFLICT_RETRIES,
+    fetchImpl = null,
   }) {
     const t = requireId(token, 'token');
     if (!t.startsWith('jkb_') || t.length > 256 || /\s/.test(t)) {
       throw new JokelboardConfigurationError('token is not a valid Jokelboard API token.');
     }
-    // Non-enumerable so it doesn't show up in console.log / JSON.stringify
     Object.defineProperty(this, '_token', { value: t, enumerable: false, writable: false });
+
+    if (fetchImpl !== null && typeof fetchImpl !== 'function') {
+      throw new JokelboardConfigurationError('fetchImpl must be a function.');
+    }
+    Object.defineProperty(this, '_fetch', {
+      value: fetchImpl ?? globalThis.fetch,
+      enumerable: false,
+      writable: false,
+    });
+
+    if (!this._fetch) {
+      throw new JokelboardConfigurationError('No fetch() available. Pass fetchImpl or use Node 18+.');
+    }
 
     this._baseUrl = normaliseBaseUrl(baseUrl);
     this._timeout = Number.isFinite(timeout) ? Math.max(1, timeout) : DEFAULT_TIMEOUT;
     this._retryOnRateLimit = retryOnRateLimit !== false;
     this._maxRetries = Number.isInteger(maxRetries) ? Math.max(0, maxRetries) : DEFAULT_MAX_RETRIES;
     this._maxConflictRetries = Number.isInteger(maxConflictRetries) ? Math.max(0, maxConflictRetries) : DEFAULT_MAX_CONFLICT_RETRIES;
+    this.defaultBoardId = defaultBoardId ? requireId(defaultBoardId, 'defaultBoardId') : null;
 
-    // Per-board write queues — ensures revision-aware writes are serialised per board
+    // Per-board write queues — serialises revision-aware writes per board
     this._writeTails = new Map();
+
+    // Namespaced frozen API groups
+    this.boards = Object.freeze({
+      list: () => this.listBoards(),
+      get: (boardId) => this.getBoard(boardId),
+      replace: (boardId, data, revision) => this.replaceBoard(boardId, data, revision),
+    });
+
+    this.lists = Object.freeze({
+      create: (boardId, title) => this.createList(boardId, title),
+    });
+
+    this.cards = Object.freeze({
+      create: (boardId, listId, title, options) => this.createCard(boardId, listId, title, options),
+      update: (boardId, cardId, fields) => this.updateCard(boardId, cardId, fields),
+      patch: (boardId, cardId, patchOrFn) => this.patchCard(boardId, cardId, patchOrFn),
+      comment: (boardId, cardId, text, options) => this.addComment(boardId, cardId, text, options),
+      move: (boardId, cardId, toListId, options) => this.moveCard(boardId, cardId, toListId, options),
+      link: (boardId, cardId) => this.getCardLink(boardId, cardId),
+      vault: (boardId, cardId) => this.vaultCard(boardId, cardId),
+      restore: (boardId, cardId, options) => this.restoreCard(boardId, cardId, options),
+      find: (boardId, predicate) => this.findCard(boardId, predicate),
+    });
+
+    this.vault = Object.freeze({
+      list: (boardId) => this.getVault(boardId),
+      purge: (boardId, cardId, revision) => this.purgeCard(boardId, cardId, revision),
+    });
 
     this.plugin = new PluginClient(this._request.bind(this));
   }
@@ -140,10 +266,11 @@ export class JokelboardClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this._timeout);
     const hasBody = body !== undefined;
+    const ctx = { method, path };
 
     let res;
     try {
-      res = await fetch(`${this._baseUrl}${path}`, {
+      res = await this._fetch(`${this._baseUrl}${path}`, {
         method,
         headers: {
           Accept: 'application/json',
@@ -156,9 +283,9 @@ export class JokelboardClient {
     } catch (err) {
       clearTimeout(timer);
       if (err?.name === 'AbortError') {
-        throw new JokelboardError('request_timeout', 'Request timed out.', 0, null);
+        throw new JokelboardError('request_timeout', 'Request timed out.', null, null, ctx);
       }
-      throw new JokelboardError('network_error', 'Unable to reach the Jokelboard API.', 0, null);
+      throw new JokelboardError('network_error', 'Unable to reach the Jokelboard API.', null, null, ctx);
     }
     clearTimeout(timer);
 
@@ -167,6 +294,7 @@ export class JokelboardClient {
     if (raw) {
       try { data = JSON.parse(raw); } catch { /* non-JSON body */ }
     }
+    const redacted = this._redact(data);
 
     if (res.ok) return data;
 
@@ -176,14 +304,15 @@ export class JokelboardClient {
         await sleep(retryAfter * 1000);
         return this._request(method, path, body, attempt + 1);
       }
-      throw new RateLimitError(data?.message ?? 'Rate limit exceeded.', retryAfter, data);
+      throw new RateLimitError(data?.message ?? 'Rate limit exceeded.', retryAfter, redacted, ctx);
     }
 
     if (res.status === 409 && data?.error === 'revision_conflict') {
       throw new RevisionConflictError(
         data?.message ?? 'Revision conflict.',
         data?.currentRevision ?? null,
-        data,
+        redacted,
+        ctx,
       );
     }
 
@@ -191,16 +320,24 @@ export class JokelboardClient {
       data?.error ?? 'http_error',
       data?.message ?? `HTTP ${res.status}`,
       res.status,
-      data,
+      redacted,
+      ctx,
     );
+  }
+
+  /**
+   * Strips the API token from any value recursively so it never appears in error objects.
+   * @param {unknown} value
+   * @returns {unknown}
+   */
+  _redact(value) {
+    return redactToken(value, this._token);
   }
 
   // ---- Revision-safe write queue ----
 
   /**
-   * Enqueues a write on a per-board queue and retries automatically on
-   * revision conflicts, re-fetching the board before each retry.
-   *
+   * Internal: enqueues a write on a per-board queue and retries on revision conflicts.
    * @param {string} boardId
    * @param {(board: object, revision: number) => Promise<any>} operation
    * @returns {Promise<any>}
@@ -214,7 +351,7 @@ export class JokelboardClient {
       for (let attempt = 0; attempt <= this._maxConflictRetries; attempt++) {
         const board = await this.getBoard(boardId);
         if (board.revision == null) {
-          throw new JokelboardError('invalid_response', 'Board response missing revision.', 0, board);
+          throw new JokelboardError('invalid_response', 'Board response missing revision.', null, board);
         }
         try {
           return await operation(board, board.revision);
@@ -225,9 +362,51 @@ export class JokelboardClient {
       }
     });
 
-    // Keep the tail alive even if the current operation rejects
     this._writeTails.set(boardId, result.catch(() => {}));
     return result;
+  }
+
+  /**
+   * Public revision helper. Fetches the current board revision then calls operation({ revision, board, boardClient, attempt }).
+   * Retries automatically on revision conflicts.
+   * @param {string} boardId
+   * @param {(ctx: { revision: number, board: object, boardClient: BoardClient, attempt: number }) => Promise<any>} operation
+   * @param {{ retries?: number }} [options]
+   * @returns {Promise<any>}
+   */
+  withFreshRevision(boardId, operation, { retries = this._maxConflictRetries } = {}) {
+    if (typeof operation !== 'function') {
+      throw new JokelboardConfigurationError('operation must be a function.');
+    }
+    const resolvedId = this.resolveBoardId(boardId);
+    const boardClient = this.board(resolvedId);
+    return this._withRevision(resolvedId, (board, revision) =>
+      operation({ revision, board, boardClient, attempt: 1 }),
+    );
+  }
+
+  /**
+   * Resolves a boardId, falling back to defaultBoardId.
+   * @param {string|null|undefined} boardId
+   * @returns {string}
+   */
+  resolveBoardId(boardId) {
+    const resolved = boardId ?? this.defaultBoardId;
+    if (resolved == null) {
+      throw new JokelboardConfigurationError(
+        'boardId is required. Pass one directly or set defaultBoardId on the client.',
+      );
+    }
+    return requireId(resolved, 'boardId');
+  }
+
+  /**
+   * Returns a board-scoped proxy so you never need to pass boardId per call.
+   * @param {string} [boardId] - Defaults to defaultBoardId
+   * @returns {BoardClient}
+   */
+  board(boardId) {
+    return new BoardClient(this, this.resolveBoardId(boardId));
   }
 
   // ---- Me ----
@@ -236,7 +415,7 @@ export class JokelboardClient {
   async getMe() {
     const d = await this._request('GET', '/me');
     if (!d?.user || !d?.token) {
-      throw new JokelboardError('invalid_response', 'Invalid identity response from Jokelboard.', 0, d);
+      throw new JokelboardError('invalid_response', 'Invalid identity response.', null, d);
     }
     return d;
   }
@@ -247,19 +426,20 @@ export class JokelboardClient {
   async listBoards() {
     const d = await this._request('GET', '/boards');
     if (!Array.isArray(d?.boards)) {
-      throw new JokelboardError('invalid_response', 'Invalid board list response.', 0, d);
+      throw new JokelboardError('invalid_response', 'Invalid board list response.', null, d);
     }
     return d.boards;
   }
 
   /**
-   * @param {string} boardId
+   * @param {string} [boardId] - Defaults to defaultBoardId
    * @returns {Promise<object>}
    */
   async getBoard(boardId) {
-    const d = await this._request('GET', `/boards/${encodeId(boardId, 'boardId')}`);
+    const id = this.resolveBoardId(boardId);
+    const d = await this._request('GET', `/boards/${encodeId(id, 'boardId')}`);
     if (!d?.board?.data || !Array.isArray(d.board.data.lists)) {
-      throw new JokelboardError('invalid_response', 'Invalid board response.', 0, d);
+      throw new JokelboardError('invalid_response', 'Invalid board response.', null, d);
     }
     return d.board;
   }
@@ -268,10 +448,9 @@ export class JokelboardClient {
    * Finds a card on a board by searching through all lists.
    * @param {string} boardId
    * @param {(card: object, list: object) => boolean} predicate
-   * @param {boolean} [refresh] - Force a fresh board fetch (default: true)
    * @returns {Promise<{card: object, list: object} | null>}
    */
-  async findCard(boardId, predicate, refresh = true) {
+  async findCard(boardId, predicate) {
     const board = await this.getBoard(boardId);
     return findCard(board, predicate);
   }
@@ -283,7 +462,8 @@ export class JokelboardClient {
    * @returns {Promise<object>}
    */
   async replaceBoard(boardId, boardData, revision) {
-    const d = await this._request('PUT', `/boards/${encodeId(boardId, 'boardId')}`, {
+    const id = this.resolveBoardId(boardId);
+    const d = await this._request('PUT', `/boards/${encodeId(id, 'boardId')}`, {
       data: boardData,
       ...(revision !== undefined && { revision }),
     });
@@ -295,13 +475,13 @@ export class JokelboardClient {
   /**
    * @param {string} boardId
    * @param {string} title
-   * @param {{id?: string}} [options]
    * @returns {Promise<object>}
    */
   async createList(boardId, title) {
+    const id = this.resolveBoardId(boardId);
     const cleanTitle = requireId(title, 'title');
-    return this._withRevision(boardId, (_, revision) =>
-      this._request('POST', `/boards/${encodeId(boardId, 'boardId')}/lists`, { title: cleanTitle, revision }),
+    return this._withRevision(id, (_, revision) =>
+      this._request('POST', `/boards/${encodeId(id, 'boardId')}/lists`, { title: cleanTitle, revision }),
     );
   }
 
@@ -315,14 +495,14 @@ export class JokelboardClient {
    * @returns {Promise<object>}
    */
   async createCard(boardId, listId, title, options) {
+    const id = this.resolveBoardId(boardId);
     const cleanTitle = requireId(title, 'title');
     const cleanListId = requireId(listId, 'listId');
-    return this._withRevision(boardId, (board, revision) => {
-      const listExists = board.data.lists.some(l => l.id === cleanListId);
-      if (!listExists) {
+    return this._withRevision(id, (board, revision) => {
+      if (!board.data.lists.some(l => l.id === cleanListId)) {
         throw new JokelboardConfigurationError(`List "${cleanListId}" does not exist on this board.`);
       }
-      return this._request('POST', `/boards/${encodeId(boardId, 'boardId')}/cards`, {
+      return this._request('POST', `/boards/${encodeId(id, 'boardId')}/cards`, {
         listId: cleanListId,
         title: cleanTitle,
         ...options,
@@ -340,9 +520,10 @@ export class JokelboardClient {
    * @returns {Promise<object>}
    */
   async updateCard(boardId, cardId, fields) {
+    const id = this.resolveBoardId(boardId);
     const d = await this._request(
       'PATCH',
-      `/boards/${encodeId(boardId, 'boardId')}/cards/${encodeId(cardId, 'cardId')}`,
+      `/boards/${encodeId(id, 'boardId')}/cards/${encodeId(cardId, 'cardId')}`,
       fields,
     );
     return d.card;
@@ -357,8 +538,9 @@ export class JokelboardClient {
    * @returns {Promise<object>}
    */
   async patchCard(boardId, cardId, patchOrFn) {
+    const id = this.resolveBoardId(boardId);
     const cleanCardId = requireId(cardId, 'cardId');
-    return this._withRevision(boardId, async (board, revision) => {
+    return this._withRevision(id, async (board, revision) => {
       let patch = patchOrFn;
       if (typeof patchOrFn === 'function') {
         const match = findCard(board, c => c.id === cleanCardId);
@@ -372,7 +554,7 @@ export class JokelboardClient {
       }
       const d = await this._request(
         'PATCH',
-        `/boards/${encodeId(boardId, 'boardId')}/cards/${encodeId(cleanCardId, 'cardId')}`,
+        `/boards/${encodeId(id, 'boardId')}/cards/${encodeId(cleanCardId, 'cardId')}`,
         { ...patch, revision },
       );
       return d.card;
@@ -436,13 +618,13 @@ export class JokelboardClient {
     if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
       throw new JokelboardConfigurationError('fields must be a plain object.');
     }
-    const normalised = Object.fromEntries(
-      Object.entries(fields).map(([k, v]) => [k, String(v)]),
-    );
+    const normalised = Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, String(v)]));
     return this.patchCard(boardId, cardId, card => ({
       fieldValues: { ...(card.fieldValues ?? {}), ...normalised },
     }));
   }
+
+  // ---- Move / link / comment ----
 
   /**
    * @param {string} boardId
@@ -452,15 +634,15 @@ export class JokelboardClient {
    * @returns {Promise<void>}
    */
   async moveCard(boardId, cardId, toListId, options = {}) {
+    const id = this.resolveBoardId(boardId);
     const cleanToListId = requireId(toListId, 'toListId');
-    return this._withRevision(boardId, (board, revision) => {
-      const listExists = board.data.lists.some(l => l.id === cleanToListId);
-      if (!listExists) {
+    return this._withRevision(id, (board, revision) => {
+      if (!board.data.lists.some(l => l.id === cleanToListId)) {
         throw new JokelboardConfigurationError(`Destination list "${cleanToListId}" does not exist on this board.`);
       }
       return this._request(
         'POST',
-        `/boards/${encodeId(boardId, 'boardId')}/cards/${encodeId(cardId, 'cardId')}/move`,
+        `/boards/${encodeId(id, 'boardId')}/cards/${encodeId(cardId, 'cardId')}/move`,
         {
           toListId: cleanToListId,
           ...(Number.isInteger(options.position) ? { position: options.position } : {}),
@@ -476,12 +658,13 @@ export class JokelboardClient {
    * @returns {Promise<string>}
    */
   async getCardLink(boardId, cardId) {
+    const id = this.resolveBoardId(boardId);
     const d = await this._request(
       'GET',
-      `/boards/${encodeId(boardId, 'boardId')}/cards/${encodeId(cardId, 'cardId')}/link`,
+      `/boards/${encodeId(id, 'boardId')}/cards/${encodeId(cardId, 'cardId')}/link`,
     );
     if (typeof d?.url !== 'string' || !d.url) {
-      throw new JokelboardError('invalid_response', 'Invalid card link response.', 0, d);
+      throw new JokelboardError('invalid_response', 'Invalid card link response.', null, d);
     }
     return d.url;
   }
@@ -494,11 +677,12 @@ export class JokelboardClient {
    * @returns {Promise<void>}
    */
   async addComment(boardId, cardId, text, options = {}) {
+    const id = this.resolveBoardId(boardId);
     const cleanText = sanitiseComment(requireId(text, 'text'));
-    return this._withRevision(boardId, (_, revision) =>
+    return this._withRevision(id, (_, revision) =>
       this._request(
         'POST',
-        `/boards/${encodeId(boardId, 'boardId')}/cards/${encodeId(cardId, 'cardId')}/comments`,
+        `/boards/${encodeId(id, 'boardId')}/cards/${encodeId(cardId, 'cardId')}/comments`,
         { text: cleanText, ...(options.kind ? { kind: options.kind } : {}), revision },
       ),
     );
@@ -511,7 +695,8 @@ export class JokelboardClient {
    * @returns {Promise<object[]>}
    */
   async getVault(boardId) {
-    const d = await this._request('GET', `/boards/${encodeId(boardId, 'boardId')}/vault`);
+    const id = this.resolveBoardId(boardId);
+    const d = await this._request('GET', `/boards/${encodeId(id, 'boardId')}/vault`);
     return d.vault;
   }
 
@@ -522,9 +707,10 @@ export class JokelboardClient {
    * @returns {Promise<void>}
    */
   vaultCard(boardId, cardId, revision) {
+    const id = this.resolveBoardId(boardId);
     return this._request(
       'POST',
-      `/boards/${encodeId(boardId, 'boardId')}/cards/${encodeId(cardId, 'cardId')}/vault`,
+      `/boards/${encodeId(id, 'boardId')}/cards/${encodeId(cardId, 'cardId')}/vault`,
       revision !== undefined ? { revision } : undefined,
     );
   }
@@ -536,9 +722,10 @@ export class JokelboardClient {
    * @returns {Promise<void>}
    */
   restoreCard(boardId, cardId, options) {
+    const id = this.resolveBoardId(boardId);
     return this._request(
       'POST',
-      `/boards/${encodeId(boardId, 'boardId')}/cards/${encodeId(cardId, 'cardId')}/restore`,
+      `/boards/${encodeId(id, 'boardId')}/cards/${encodeId(cardId, 'cardId')}/restore`,
       options,
     );
   }
@@ -550,7 +737,8 @@ export class JokelboardClient {
    * @returns {Promise<void>}
    */
   purgeCard(boardId, cardId, revision) {
-    const path = `/boards/${encodeId(boardId, 'boardId')}/vault/${encodeId(cardId, 'cardId')}`;
+    const id = this.resolveBoardId(boardId);
+    const path = `/boards/${encodeId(id, 'boardId')}/vault/${encodeId(cardId, 'cardId')}`;
     return this._request('DELETE', revision !== undefined ? `${path}?revision=${revision}` : path);
   }
 
@@ -558,17 +746,20 @@ export class JokelboardClient {
 
   /** @param {string} boardId @returns {Promise<object[]>} */
   async listBoardTokens(boardId) {
-    return (await this._request('GET', `/boards/${encodeId(boardId, 'boardId')}/tokens`)).tokens;
+    const id = this.resolveBoardId(boardId);
+    return (await this._request('GET', `/boards/${encodeId(id, 'boardId')}/tokens`)).tokens;
   }
 
   /** @param {string} boardId @param {string} name @param {string} type @returns {Promise<object>} */
   async createBoardToken(boardId, name, type) {
-    return (await this._request('POST', `/boards/${encodeId(boardId, 'boardId')}/tokens`, { name, type })).token;
+    const id = this.resolveBoardId(boardId);
+    return (await this._request('POST', `/boards/${encodeId(id, 'boardId')}/tokens`, { name, type })).token;
   }
 
   /** @param {string} boardId @param {string} tokenId @returns {Promise<void>} */
   deleteBoardToken(boardId, tokenId) {
-    return this._request('DELETE', `/boards/${encodeId(boardId, 'boardId')}/tokens/${encodeId(tokenId, 'tokenId')}`);
+    const id = this.resolveBoardId(boardId);
+    return this._request('DELETE', `/boards/${encodeId(id, 'boardId')}/tokens/${encodeId(tokenId, 'tokenId')}`);
   }
 
   // ---- Profile tokens ----
@@ -612,7 +803,11 @@ export class JokelboardClient {
    * @returns {Promise<object>}
    */
   async configureOrgBotToken(orgId, tokenId, config) {
-    return (await this._request('PATCH', `/organisations/${encodeId(orgId, 'orgId')}/tokens/${encodeId(tokenId, 'tokenId')}/bot`, config)).token;
+    return (await this._request(
+      'PATCH',
+      `/organisations/${encodeId(orgId, 'orgId')}/tokens/${encodeId(tokenId, 'tokenId')}/bot`,
+      config,
+    )).token;
   }
 }
 
