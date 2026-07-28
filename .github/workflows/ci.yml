@@ -15,7 +15,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: npm install
       - run: npm run typecheck -w packages/typescript
       - run: npm run build -w packages/typescript
 
