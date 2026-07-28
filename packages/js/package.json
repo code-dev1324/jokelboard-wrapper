@@ -12,7 +12,7 @@
   "author": "code-dev1324",
   "repository": {
     "type": "git",
-    "url": "https://github.com/code-dev1324/jokelboard-wrapper",
+    "url": "git+https://github.com/code-dev1324/jokelboard-wrapper.git",
     "directory": "packages/js"
   },
   "type": "module",
