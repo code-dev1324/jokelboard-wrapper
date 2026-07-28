@@ -1,8 +1,13 @@
 {
   "name": "@yeetgodpro1324/jokelboard-js",
-  "version": "1.0.0",
+  "version": "1.4.0",
   "description": "JavaScript client for the Jokelboard API",
-  "keywords": ["jokelboard", "api", "javascript", "kanban"],
+  "keywords": [
+    "jokelboard",
+    "api",
+    "javascript",
+    "kanban"
+  ],
   "license": "MIT",
   "author": "code-dev1324",
   "repository": {
@@ -15,6 +20,14 @@
   "exports": {
     ".": "./src/index.js"
   },
-  "files": ["src", "README.md"],
-  "engines": { "node": ">=18.0.0" }
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/client.test.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }

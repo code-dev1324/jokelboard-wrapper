@@ -146,10 +146,20 @@ class BoardClient {
       toggleChecklistItem: (cardId, itemId) => api.plugin.toggleChecklistItem(boardId, cardId, itemId),
     });
 
+    this.cards = Object.freeze({
+      ...this.cards,
+      get: (cardId) => api.getCard(boardId, cardId),
+      findByTitle: (title) => api.findCardByTitle(boardId, title),
+      findById: (cardId) => api.findCardById(boardId, cardId),
+    });
+
     Object.freeze(this);
   }
 
   /** @returns {Promise<object>} */
+  /** @returns {Promise<object[]>} */
+  getLists() { return this._api.getLists(this.id); }
+
   get() { return this._api.getBoard(this.id); }
 
   /**
@@ -221,8 +231,15 @@ export class JokelboardClient {
 
     // Per-board write queues — serialises revision-aware writes per board
     this._writeTails = new Map();
+    const pluginImpl = new PluginClient(this._request.bind(this));
 
     // Namespaced frozen API groups
+    this.plugin = Object.freeze({
+      getAccessLevel: () => pluginImpl.getAccessLevel(),
+      getBoard: (boardId) => pluginImpl.getBoard(boardId),
+      toggleChecklistItem: (boardId, cardId, itemId) => pluginImpl.toggleChecklistItem(boardId, cardId, itemId),
+    });
+
     this.boards = Object.freeze({
       list: () => this.listBoards(),
       get: (boardId) => this.getBoard(boardId),
@@ -249,8 +266,6 @@ export class JokelboardClient {
       list: (boardId) => this.getVault(boardId),
       purge: (boardId, cardId, revision) => this.purgeCard(boardId, cardId, revision),
     });
-
-    this.plugin = new PluginClient(this._request.bind(this));
   }
 
   // ---- Core HTTP ----
@@ -299,7 +314,7 @@ export class JokelboardClient {
     if (res.ok) return data;
 
     if (res.status === 429) {
-      const retryAfter = data?.retryAfter ?? Number(res.headers.get('retry-after')) || 1;
+      const retryAfter = data?.retryAfter ?? (Number(res.headers.get('retry-after')) || 1);
       if (this._retryOnRateLimit && attempt < this._maxRetries) {
         await sleep(retryAfter * 1000);
         return this._request(method, path, body, attempt + 1);
@@ -445,6 +460,16 @@ export class JokelboardClient {
   }
 
   /**
+   * Returns all lists on a board.
+   * @param {string} [boardId]
+   * @returns {Promise<object[]>}
+   */
+  async getLists(boardId) {
+    const board = await this.getBoard(boardId);
+    return board.data.lists;
+  }
+
+  /**
    * Finds a card on a board by searching through all lists.
    * @param {string} boardId
    * @param {(card: object, list: object) => boolean} predicate
@@ -453,6 +478,46 @@ export class JokelboardClient {
   async findCard(boardId, predicate) {
     const board = await this.getBoard(boardId);
     return findCard(board, predicate);
+  }
+
+  /**
+   * Fetches a single card by ID. Throws if not found.
+   * @param {string} boardId
+   * @param {string} cardId
+   * @returns {Promise<object>}
+   */
+  async getCard(boardId, cardId) {
+    const cleanCardId = requireId(cardId, 'cardId');
+    const board = await this.getBoard(boardId);
+    const match = findCard(board, c => c.id === cleanCardId);
+    if (!match) {
+      throw new JokelboardError('card_not_found', `Card "${cleanCardId}" not found on board.`, 404, null);
+    }
+    return match.card;
+  }
+
+  /**
+   * Finds a card by exact title (case-insensitive). Returns null if not found.
+   * @param {string} boardId
+   * @param {string} title
+   * @returns {Promise<{card: object, list: object} | null>}
+   */
+  async findCardByTitle(boardId, title) {
+    const target = requireId(title, 'title').toLowerCase();
+    const board = await this.getBoard(boardId);
+    return findCard(board, c => typeof c.title === 'string' && c.title.trim().toLowerCase() === target);
+  }
+
+  /**
+   * Finds a card by ID. Returns null if not found.
+   * @param {string} boardId
+   * @param {string} cardId
+   * @returns {Promise<{card: object, list: object} | null>}
+   */
+  async findCardById(boardId, cardId) {
+    const target = requireId(cardId, 'cardId');
+    const board = await this.getBoard(boardId);
+    return findCard(board, c => c.id === target);
   }
 
   /**
@@ -703,30 +768,33 @@ export class JokelboardClient {
   /**
    * @param {string} boardId
    * @param {string} cardId
-   * @param {number} [revision]
    * @returns {Promise<void>}
    */
-  vaultCard(boardId, cardId, revision) {
+  vaultCard(boardId, cardId) {
     const id = this.resolveBoardId(boardId);
-    return this._request(
-      'POST',
-      `/boards/${encodeId(id, 'boardId')}/cards/${encodeId(cardId, 'cardId')}/vault`,
-      revision !== undefined ? { revision } : undefined,
+    return this._withRevision(id, (_, revision) =>
+      this._request(
+        'POST',
+        `/boards/${encodeId(id, 'boardId')}/cards/${encodeId(cardId, 'cardId')}/vault`,
+        { revision },
+      ),
     );
   }
 
   /**
    * @param {string} boardId
    * @param {string} cardId
-   * @param {{toListId?: string, position?: number, revision?: number}} [options]
+   * @param {{toListId?: string, position?: number}} [options]
    * @returns {Promise<void>}
    */
-  restoreCard(boardId, cardId, options) {
+  restoreCard(boardId, cardId, options = {}) {
     const id = this.resolveBoardId(boardId);
-    return this._request(
-      'POST',
-      `/boards/${encodeId(id, 'boardId')}/cards/${encodeId(cardId, 'cardId')}/restore`,
-      options,
+    return this._withRevision(id, (_, revision) =>
+      this._request(
+        'POST',
+        `/boards/${encodeId(id, 'boardId')}/cards/${encodeId(cardId, 'cardId')}/restore`,
+        { ...options, revision },
+      ),
     );
   }
 

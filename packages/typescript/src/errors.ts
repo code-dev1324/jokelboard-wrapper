@@ -19,7 +19,7 @@ export type ErrorCode =
   | 'revision_conflict'
   | 'list_exists'
   | 'card_exists'
-  | 'card_rate_limited'
+  | 'rate_limited'
   | 'invalid_data'
   | 'invalid_card_patch'
   | 'invalid_type'
@@ -29,41 +29,89 @@ export type ErrorCode =
   | 'avatar_invalid'
   | 'text_required'
   | 'gone'
+  | 'http_error'
+  | 'network_error'
+  | 'request_timeout'
+  | 'invalid_response'
+  | 'configuration_error'
   | (string & {});
+
+export interface ErrorContext {
+  method?: string | null;
+  path?: string | null;
+}
+
+export interface ErrorJSON {
+  name: string;
+  message: string;
+  code: string;
+  status: number | null;
+  method: string | null;
+  path: string | null;
+  retryable: boolean;
+}
 
 export class JokelboardError extends Error {
   readonly code: ErrorCode;
-  readonly status: number;
+  readonly status: number | null;
   readonly raw: unknown;
+  readonly method: string | null;
+  readonly path: string | null;
+  readonly retryable: boolean;
 
-  constructor(code: ErrorCode, message: string, status: number, raw?: unknown) {
+  constructor(code: ErrorCode, message: string, status: number | null, raw?: unknown, context: ErrorContext = {}) {
     super(message);
     this.name = 'JokelboardError';
     this.code = code;
-    this.status = status;
-    this.raw = raw;
+    this.status = status ?? null;
+    this.raw = raw ?? null;
+    this.method = context.method ?? null;
+    this.path = context.path ?? null;
+    this.retryable = status === null || status === 429 || status >= 500 || code === 'revision_conflict';
+  }
+
+  toJSON(): ErrorJSON {
+    return {
+      name: this.name,
+      message: this.message,
+      code: this.code,
+      status: this.status,
+      method: this.method,
+      path: this.path,
+      retryable: this.retryable,
+    };
+  }
+}
+
+export class JokelboardConfigurationError extends Error {
+  readonly code = 'configuration_error';
+  readonly retryable = false;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'JokelboardConfigurationError';
+  }
+
+  toJSON() {
+    return { name: this.name, message: this.message, code: this.code, retryable: false };
   }
 }
 
 export class RateLimitError extends JokelboardError {
   readonly retryAfter: number;
-  readonly limit: number;
-  readonly windowMs: number;
 
-  constructor(message: string, retryAfter: number, limit: number, windowMs: number, raw?: unknown) {
-    super('card_rate_limited', message, 429, raw);
+  constructor(message: string, retryAfter: number, raw?: unknown, context?: ErrorContext) {
+    super('rate_limited', message, 429, raw, context);
     this.name = 'RateLimitError';
     this.retryAfter = retryAfter;
-    this.limit = limit;
-    this.windowMs = windowMs;
   }
 }
 
 export class RevisionConflictError extends JokelboardError {
-  readonly currentRevision: number;
+  readonly currentRevision: number | null;
 
-  constructor(message: string, currentRevision: number, raw?: unknown) {
-    super('revision_conflict', message, 409, raw);
+  constructor(message: string, currentRevision: number | null, raw?: unknown, context?: ErrorContext) {
+    super('revision_conflict', message, 409, raw, context);
     this.name = 'RevisionConflictError';
     this.currentRevision = currentRevision;
   }

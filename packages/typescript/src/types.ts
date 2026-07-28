@@ -184,6 +184,11 @@ export interface CardLink {
   url: string;
 }
 
+export interface CardMatch {
+  card: BoardCard;
+  list: BoardList;
+}
+
 // ---- Request option types ----
 
 export interface CreateCardOptions {
@@ -197,7 +202,6 @@ export interface CreateCardOptions {
   due?: { iso: string };
   checklist?: Checklist;
   attachments?: Attachment[];
-  revision?: number;
 }
 
 export interface UpdateCardFields {
@@ -215,28 +219,19 @@ export interface UpdateCardFields {
   dueDepart?: { iso: string } | null;
   checklist?: Checklist;
   attachments?: Attachment[];
-  revision?: number;
-}
-
-export interface CreateListOptions {
-  id?: string;
-  revision?: number;
 }
 
 export interface AddCommentOptions {
   kind?: CommentKind;
-  revision?: number;
 }
 
 export interface MoveCardOptions {
   position?: number;
-  revision?: number;
 }
 
 export interface RestoreCardOptions {
   toListId?: string;
   position?: number;
-  revision?: number;
 }
 
 export interface BotConfig {
@@ -244,10 +239,37 @@ export interface BotConfig {
   avatar?: string | null;
 }
 
+export type PatchCardFn = (
+  card: BoardCard,
+  list: BoardList,
+  board: Board,
+) => UpdateCardFields | Promise<UpdateCardFields>;
+
+export interface WithFreshRevisionContext {
+  revision: number;
+  board: Board;
+  boardClient: BoardClientInterface;
+  attempt: number;
+}
+
 export interface ClientOptions {
   token: string;
+  defaultBoardId?: string | null;
   baseUrl?: string;
   timeout?: number;
   retryOnRateLimit?: boolean;
   maxRetries?: number;
+  maxConflictRetries?: number;
+  fetchImpl?: typeof fetch | null;
+}
+
+// Structural interface for BoardClient (avoids circular import in types file)
+export interface BoardClientInterface {
+  readonly id: string;
+  get(): Promise<Board>;
+  replace(boardData: BoardData, revision?: number): Promise<Board>;
+  withFreshRevision(
+    operation: (ctx: WithFreshRevisionContext) => Promise<unknown>,
+    options?: { retries?: number },
+  ): Promise<unknown>;
 }

@@ -1,23 +1,24 @@
-export { JokelboardClient } from './client.js';
-export { JokelboardError, RateLimitError, RevisionConflictError } from './errors.js';
-export type { ErrorCode } from './errors.js';
+export { JokelboardClient, BoardClient, findCard } from './client.js';
+export { JokelboardError, JokelboardConfigurationError, RateLimitError, RevisionConflictError } from './errors.js';
+export type { ErrorCode, ErrorContext, ErrorJSON } from './errors.js';
 export type {
   AddCommentOptions,
   Attachment,
   Board,
   BoardCard,
+  BoardClientInterface,
   BoardData,
   BoardList,
   BoardSummary,
   BotConfig,
   CardLink,
+  CardMatch,
   Checklist,
   ChecklistItem,
   ClientOptions,
   Comment,
   CommentKind,
   CreateCardOptions,
-  CreateListOptions,
   CreatedCard,
   DateType,
   DescriptionMode,
@@ -27,6 +28,7 @@ export type {
   Label,
   MeUser,
   MoveCardOptions,
+  PatchCardFn,
   PluginBoard,
   PluginCard,
   PluginList,
@@ -38,4 +40,5 @@ export type {
   UpdateCardFields,
   VaultEntry,
   VaultedCard,
+  WithFreshRevisionContext,
 } from './types.js';
