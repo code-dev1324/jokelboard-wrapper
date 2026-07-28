@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional, TypedDict
+from typing import Any, Callable, Literal, Optional, TypedDict, Union
 
 
 class Label(TypedDict, total=False):
@@ -98,6 +98,11 @@ class Board(BoardSummary, total=False):
     data: BoardData
 
 
+class CardMatch(TypedDict):
+    card: BoardCard
+    list: BoardList
+
+
 class Token(TypedDict, total=False):
     id: str
     kind: Literal["board", "profile", "org"]
@@ -150,3 +155,7 @@ class CardLink(TypedDict):
     canonical: bool
     path: str
     url: str
+
+
+# Type alias for patch functions
+PatchCardFn = Callable[[BoardCard, BoardList, Board], dict[str, Any]]

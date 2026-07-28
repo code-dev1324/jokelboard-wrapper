@@ -38,5 +38,17 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install httpx
-      - run: python -c "from jokelboard import JokelboardClient; print('import ok')"
-        working-directory: packages/python
+      - working-directory: packages/python
+        run: |
+          python -c "
+          from jokelboard import JokelboardClient, BoardClient, find_card
+          from jokelboard import JokelboardError, JokelboardConfigurationError, RateLimitError, RevisionConflictError
+          board = {'data': {'lists': [{'id': 'l1', 'title': 'T', 'cards': [{'id': 'c1', 'title': 'Fix'}]}]}}
+          m = find_card(board, lambda c, _: c['id'] == 'c1')
+          assert m['card']['title'] == 'Fix'
+          try:
+              JokelboardClient(token='bad')
+          except JokelboardConfigurationError:
+              pass
+          print('python ok')
+          "

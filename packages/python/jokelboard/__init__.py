@@ -1,5 +1,5 @@
-from .client import JokelboardClient
-from .errors import JokelboardError, RateLimitError, RevisionConflictError
+from .client import BoardClient, JokelboardClient, find_card
+from .errors import JokelboardConfigurationError, JokelboardError, RateLimitError, RevisionConflictError
 from .types import (
     Attachment,
     Board,
@@ -8,11 +8,13 @@ from .types import (
     BoardList,
     BoardSummary,
     CardLink,
+    CardMatch,
     Checklist,
     ChecklistItem,
     Comment,
     DueDate,
     Label,
+    PatchCardFn,
     PluginBoard,
     PluginCard,
     PluginList,
@@ -22,7 +24,10 @@ from .types import (
 )
 
 __all__ = [
+    "BoardClient",
     "JokelboardClient",
+    "find_card",
+    "JokelboardConfigurationError",
     "JokelboardError",
     "RateLimitError",
     "RevisionConflictError",
@@ -33,11 +38,13 @@ __all__ = [
     "BoardList",
     "BoardSummary",
     "CardLink",
+    "CardMatch",
     "Checklist",
     "ChecklistItem",
     "Comment",
     "DueDate",
     "Label",
+    "PatchCardFn",
     "PluginBoard",
     "PluginCard",
     "PluginList",

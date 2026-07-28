@@ -4,6 +4,35 @@ All notable changes to packages in this monorepo are documented here.
 
 ---
 
+## jokelboard (Python)
+
+### 2.0.0
+
+- Full rewrite to reach feature parity with JS/TS packages
+- Added `BoardClient` proxy (`client.board(board_id?)`)
+- Added `get_lists()`, `get_card()`, `find_card()`, `find_card_by_title()`, `find_card_by_id()`
+- Added `get_custom_field()`, `get_custom_fields()`, `set_custom_field()`, `set_custom_fields()`
+- Added `patch_card(board_id, card_id, patch)` — accepts dict or callable `(card, list, board) -> dict`
+- Added `with_fresh_revision()` with `_FreshRevisionContext`
+- Added `resolve_board_id()` with `default_board_id` fallback
+- Added `find_card` as a named export (synchronous helper)
+- Added `CardMatch`, `PatchCardFn` types
+- `vault_card` and `restore_card` now go through `_with_revision`
+- `create_list`, `create_card`, `move_card`, `add_comment` now go through `_with_revision`
+- Per-board `threading.Lock` serialises concurrent writes
+- Added `JokelboardConfigurationError` distinct from `JokelboardError`
+- All errors enriched: `method`, `path`, `retryable`, `to_dict()`
+- Token stripped from all error `.raw` via `_redact_token`
+- Removed `limit`/`window_ms` from `RateLimitError` to match JS/TS
+- URL validation: rejects credentials, query strings, fragments, non-HTTPS (localhost exempted)
+- `revision` removed from public method signatures — handled internally
+
+### 1.0.0
+
+- Initial release: basic board, card, vault, token management
+
+---
+
 ## @yeetgodpro1324/jokelboard-js
 
 ### 1.4.0
