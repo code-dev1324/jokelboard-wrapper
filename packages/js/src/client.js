@@ -379,6 +379,71 @@ export class JokelboardClient {
     });
   }
 
+  // ---- Custom fields ----
+
+  /**
+   * Returns all custom field values for a card.
+   * @param {string} boardId
+   * @param {string} cardId
+   * @returns {Promise<Record<string, string>>}
+   */
+  async getCustomFields(boardId, cardId) {
+    const cleanCardId = requireId(cardId, 'cardId');
+    const board = await this.getBoard(boardId);
+    const match = findCard(board, c => c.id === cleanCardId);
+    if (!match) {
+      throw new JokelboardError('card_not_found', `Card "${cleanCardId}" not found on board.`, 404, null);
+    }
+    return match.card.fieldValues ?? {};
+  }
+
+  /**
+   * Returns the value of a single custom field, or null if not set.
+   * @param {string} boardId
+   * @param {string} cardId
+   * @param {string} fieldKey
+   * @returns {Promise<string | null>}
+   */
+  async getCustomField(boardId, cardId, fieldKey) {
+    requireId(fieldKey, 'fieldKey');
+    const fields = await this.getCustomFields(boardId, cardId);
+    return fields[fieldKey] ?? null;
+  }
+
+  /**
+   * Sets a single custom field, preserving all other existing field values.
+   * @param {string} boardId
+   * @param {string} cardId
+   * @param {string} fieldKey
+   * @param {string | number} value
+   * @returns {Promise<object>}
+   */
+  setCustomField(boardId, cardId, fieldKey, value) {
+    requireId(fieldKey, 'fieldKey');
+    return this.patchCard(boardId, cardId, card => ({
+      fieldValues: { ...(card.fieldValues ?? {}), [fieldKey]: String(value) },
+    }));
+  }
+
+  /**
+   * Merges multiple custom field values, preserving all existing fields not in the update.
+   * @param {string} boardId
+   * @param {string} cardId
+   * @param {Record<string, string | number>} fields
+   * @returns {Promise<object>}
+   */
+  setCustomFields(boardId, cardId, fields) {
+    if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+      throw new JokelboardConfigurationError('fields must be a plain object.');
+    }
+    const normalised = Object.fromEntries(
+      Object.entries(fields).map(([k, v]) => [k, String(v)]),
+    );
+    return this.patchCard(boardId, cardId, card => ({
+      fieldValues: { ...(card.fieldValues ?? {}), ...normalised },
+    }));
+  }
+
   /**
    * @param {string} boardId
    * @param {string} cardId
