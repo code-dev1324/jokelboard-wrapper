@@ -1,0 +1,20 @@
+{
+  "name": "@jokelboard/js",
+  "version": "1.0.0",
+  "description": "JavaScript client for the Jokelboard API",
+  "keywords": ["jokelboard", "api", "javascript", "kanban"],
+  "license": "MIT",
+  "author": "code-dev1324",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/code-dev1324/jokelboard-wrapper",
+    "directory": "packages/js"
+  },
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": ["src", "README.md"],
+  "engines": { "node": ">=18.0.0" }
+}

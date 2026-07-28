@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "jokelboard"
+version = "1.0.0"
+description = "Python client for the Jokelboard API"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "code-dev1324" }]
+requires-python = ">=3.10"
+keywords = ["jokelboard", "api", "client", "kanban"]
+dependencies = ["httpx>=0.27.0"]
+
+[project.urls]
+Repository = "https://github.com/code-dev1324/jokelboard-wrapper"
+"Bug Tracker" = "https://github.com/code-dev1324/jokelboard-wrapper/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["jokelboard"]
