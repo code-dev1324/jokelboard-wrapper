@@ -306,11 +306,18 @@ class JokelboardClient:
 
     # ---- Revision-safe write queue ----
 
-    def _with_revision(self, board_id: str, operation: Callable[[Board, int], Any]) -> Any:
+    def _with_revision(
+        self,
+        board_id: str,
+        operation: Callable[[Board, int], Any],
+        *,
+        max_conflict_retries: Optional[int] = None,
+    ) -> Any:
         """Acquire per-board lock, fetch revision, call operation, retry on conflict."""
+        retries = self._max_conflict_retries if max_conflict_retries is None else max_conflict_retries
         lock = self._get_write_lock(board_id)
         with lock:
-            for attempt in range(self._max_conflict_retries + 1):
+            for attempt in range(retries + 1):
                 board = self.get_board(board_id)
                 revision = board.get("revision")
                 if revision is None:
@@ -318,7 +325,7 @@ class JokelboardClient:
                 try:
                     return operation(board, revision)
                 except RevisionConflictError:
-                    if attempt < self._max_conflict_retries:
+                    if attempt < retries:
                         continue
                     raise
 
@@ -344,12 +351,7 @@ class JokelboardClient:
             ctx = _FreshRevisionContext(revision=revision, board=board, board_client=board_client, attempt=1)
             return operation(ctx)
 
-        original_max = self._max_conflict_retries
-        self._max_conflict_retries = max_retries
-        try:
-            return self._with_revision(resolved, _op)
-        finally:
-            self._max_conflict_retries = original_max
+        return self._with_revision(resolved, _op, max_conflict_retries=max_retries)
 
     def resolve_board_id(self, board_id: Optional[str]) -> str:
         """Return *board_id* if given, else ``default_board_id``. Raises if neither is set."""

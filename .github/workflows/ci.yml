@@ -37,9 +37,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install httpx
-      - working-directory: packages/python
-        run: |
+      - run: pip install packages/python
+      - run: |
           python -c "
           from jokelboard import JokelboardClient, BoardClient, find_card
           from jokelboard import JokelboardError, JokelboardConfigurationError, RateLimitError, RevisionConflictError
